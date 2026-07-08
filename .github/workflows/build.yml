@@ -1,0 +1,58 @@
+name: Build Offline Docker Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      docker_version:
+        description: 'Docker 版本号（例如 29.6.1）'
+        required: true
+        type: string
+        default: '29.6.1'
+      arch:
+        description: '目标 CPU 架构'
+        required: true
+        type: choice
+        options:
+          - x86_64
+          - aarch64
+        default: 'x86_64'
+      china_mirror:
+        description: '使用 ghproxy.com 代理下载 Docker Compose'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build offline Docker package
+        run: |
+          set -euo pipefail
+          MIRROR_FLAG=""
+          if [ "${{ inputs.china_mirror }}" = "true" ]; then
+            MIRROR_FLAG="--china-mirror"
+          fi
+          bash build_offline.sh \
+            --version "${{ inputs.docker_version }}" \
+            --arch "${{ inputs.arch }}" \
+            $MIRROR_FLAG \
+            --non-interactive
+
+      - name: Package as zip
+        run: |
+          set -euo pipefail
+          cd offline-docker-*/
+          zip -r "../offline-docker-${{ inputs.docker_version }}-${{ inputs.arch }}.zip" .
+          cd ..
+          echo "Package size: $(du -sh offline-docker-*.zip | cut -f1)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-docker-${{ inputs.docker_version }}-${{ inputs.arch }}
+          path: offline-docker-*.zip
+          retention-days: 30

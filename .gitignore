@@ -1,0 +1,6 @@
+.DS_Store
+packages/docker-ce/*.tgz
+packages/docker-ce/docker/
+packages/docker-ce/docker-compose-*
+offline-docker-*/
+*.zip

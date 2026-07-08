@@ -1,0 +1,26 @@
+{
+  "bip": "10.198.0.1/16",
+  "default-address-pools": [
+    {
+      "scope": "local",
+      "base": "10.199.0.0/16",
+      "size": 24
+    },
+    {
+      "scope": "global",
+      "base": "10.199.0.0/16",
+      "size": 24
+    }
+  ],
+  "registry-mirrors": [
+    "https://dockerhub.azk8s.cn",
+    "https://hub-mirror.c.163.com"
+  ],
+  "live-restore": true,
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m",
+    "max-file": "3"
+  },
+  "data-root": "/var/lib/docker"
+}
