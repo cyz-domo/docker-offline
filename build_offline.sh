@@ -18,6 +18,14 @@
 
 set -euo pipefail
 
+# ---- 依赖检查（必须放在第一段可执行代码）----
+for _cmd in cat cp curl du find gzip mkdir mktemp sed sort tar; do
+    if ! command -v "$_cmd" >/dev/null 2>&1; then
+        echo "[错误] 缺少必要的命令: $_cmd" >&2
+        exit 1
+    fi
+done
+
 # ---- 命令行参数 ----
 non_interactive=0
 arg_version=""
@@ -478,7 +486,11 @@ backup_old_docker() {
 
     # 配置文件
     [ -f "/etc/containerd/config.toml" ] && mv -vf "/etc/containerd/config.toml" "/etc/containerd/config.toml.bk.${cur_time}"
-    [ -f "/etc/docker/daemon.json" ]    && mv -vf "/etc/docker/daemon.json"    "/etc/docker/daemon.json.bk.${cur_time}"
+    # daemon.json —— 只备份不移动，保留原文件供后续判断（install 覆盖，upgrade 保留）
+    if [ -f "/etc/docker/daemon.json" ]; then
+        cp -vf "/etc/docker/daemon.json" "/etc/docker/daemon.json.bk.${cur_time}"
+        echo "[信息] 已备份 daemon.json → daemon.json.bk.${cur_time}"
+    fi
 
     echo "[信息] 备份完成（后缀: .bk.${cur_time}）"
     echo ""
@@ -626,6 +638,260 @@ INSTALL_EOF
     sed_inplace "s|__VERSION__|${safe_version}|g" "${output_dir}/install.sh"
     sed_inplace "s|__ARCH__|${target_arch}|g" "${output_dir}/install.sh"
     chmod +x "${output_dir}/install.sh"
+}
+
+# ---- 生成 upgrade.sh ----
+write_upgrade_sh() {
+    local safe_version
+    safe_version=$(sed_escape "$selected_version")
+
+    cat > "${output_dir}/upgrade.sh" << 'UPGRADE_EOF'
+#!/bin/bash
+##############################################################################
+# Docker __VERSION__ 升级脚本
+# 目标架构: __ARCH__
+# 使用方法: sudo bash upgrade.sh
+#
+# 与 install.sh 区别：保留现有 /etc/docker/daemon.json 不变
+##############################################################################
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+cur_time=$(date "+%Y%m%d%H%M%S")
+target_version="__VERSION__"
+
+echo "============================================"
+echo " Docker 升级到 __VERSION__"
+echo " 目标架构: __ARCH__"
+echo "============================================"
+echo ""
+
+# ---- 依赖检查 ----
+if ! command -v systemctl >/dev/null 2>&1; then
+    echo "[错误] 此脚本需要 systemd，但当前系统未检测到 systemctl。"
+    exit 1
+fi
+
+for cmd in tar cp chmod mkdir sed; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[错误] 缺少必要的命令: $cmd"
+        exit 1
+    fi
+done
+
+# ---- 权限检查 ----
+if [ "$(id -u)" -ne 0 ]; then
+    echo "[错误] 请使用 root 用户或 sudo 运行此脚本！"
+    exit 1
+fi
+
+# ---- 检查已有安装 ----
+if ! [ -f "/usr/bin/docker" ] && ! [ -f "/usr/local/bin/docker" ]; then
+    echo "[警告] 未检测到已有 Docker 安装，建议使用 install.sh 进行全新安装。"
+    read -r -p "继续升级安装？[y/N] " cont
+    case $cont in
+        [yY][eE][sS]|[yY]) ;;
+        *) echo "已取消。"; exit 0 ;;
+    esac
+fi
+
+# ---- 显示系统信息 ----
+echo "[信息] 系统信息："
+cat /etc/os-release 2>/dev/null | head -4 || true
+uname -a
+echo ""
+
+# ---- 显示当前版本 ----
+if docker -v >/dev/null 2>&1; then
+    echo "[信息] 当前 Docker 版本:"
+    docker -v
+fi
+echo ""
+
+# ---- 备份旧的 Docker ----
+echo "============================================"
+echo " 备份旧版 Docker..."
+echo "============================================"
+
+# 停止现有服务
+systemctl stop docker.service 2>/dev/null || true
+systemctl stop containerd.service 2>/dev/null || true
+
+# 已知的二进制文件
+modern_bins=(docker dockerd docker-init docker-proxy containerd containerd-shim-runc-v2 ctr runc)
+legacy_bins=(docker-runc docker-containerd docker-containerd-shim docker-containerd-ctr containerd-shim)
+
+for f in "${modern_bins[@]}" "${legacy_bins[@]}"; do
+    [ -f "/usr/bin/${f}" ]      && mv -vf "/usr/bin/${f}"      "/usr/bin/${f}.bk.${cur_time}"
+    [ -f "/usr/local/bin/${f}" ] && mv -vf "/usr/local/bin/${f}" "/usr/local/bin/${f}.bk.${cur_time}"
+done
+
+# docker-compose
+[ -f "/usr/bin/docker-compose" ]      && mv -vf "/usr/bin/docker-compose"      "/usr/bin/docker-compose.bk.${cur_time}"
+[ -f "/usr/local/bin/docker-compose" ] && mv -vf "/usr/local/bin/docker-compose" "/usr/local/bin/docker-compose.bk.${cur_time}"
+
+# systemd 服务文件
+for p in /etc/systemd/system/docker.service /lib/systemd/system/docker.service /usr/lib/systemd/system/docker.service \
+         /etc/systemd/system/containerd.service /lib/systemd/system/containerd.service; do
+    [ -f "$p" ] && mv -vf "$p" "${p}.bk.${cur_time}"
+done
+
+# containerd 配置（只备份，不覆盖）
+[ -f "/etc/containerd/config.toml" ] && mv -vf "/etc/containerd/config.toml" "/etc/containerd/config.toml.bk.${cur_time}"
+
+# daemon.json —— 只备份不移走（install 覆盖，upgrade 保留）
+if [ -f "/etc/docker/daemon.json" ]; then
+    cp -vf "/etc/docker/daemon.json" "/etc/docker/daemon.json.bk.${cur_time}"
+    echo "[信息] 已备份 daemon.json → daemon.json.bk.${cur_time}"
+fi
+
+echo "[信息] 备份完成（后缀: .bk.${cur_time}）"
+echo ""
+
+# ---- 解压 Docker 二进制包 ----
+echo "============================================"
+echo " 解压 Docker ${target_version} 二进制包..."
+echo "============================================"
+tar -zxvf "${script_dir}/packages/docker-${target_version}.tgz" -C "${script_dir}/packages/"
+echo ""
+
+# ---- 安装 Docker 二进制文件 ----
+echo "============================================"
+echo " 安装 Docker 二进制文件..."
+echo "============================================"
+known_bins=(docker dockerd docker-init docker-proxy containerd containerd-shim-runc-v2 ctr runc)
+for bin in "${known_bins[@]}"; do
+    if [ -f "${script_dir}/packages/docker/${bin}" ]; then
+        cp -fv "${script_dir}/packages/docker/${bin}" "/usr/bin/"
+        chmod 755 "/usr/bin/${bin}"
+    fi
+done
+
+for bin in docker dockerd containerd runc; do
+    if [ ! -f "/usr/bin/${bin}" ]; then
+        echo "[错误] 二进制文件未成功安装: /usr/bin/${bin}"
+        exit 1
+    fi
+done
+echo ""
+
+# ---- 安装 docker-compose ----
+echo "============================================"
+echo " 安装 docker-compose..."
+echo "============================================"
+cp -fv "${script_dir}/packages/docker-compose-linux" "/usr/bin/docker-compose"
+chmod 755 "/usr/bin/docker-compose"
+echo ""
+
+# ---- 配置 systemd 服务（更新）----
+echo "============================================"
+echo " 更新 systemd 服务文件..."
+echo "============================================"
+mkdir -p /etc/systemd/system /etc/docker /etc/containerd
+
+cp -fv "${script_dir}/config/docker.service" "/etc/systemd/system/docker.service"
+cp -fv "${script_dir}/config/containerd.service" "/etc/systemd/system/containerd.service"
+
+# 保留现有 daemon.json，不存在则创建默认配置
+if [ ! -f "/etc/docker/daemon.json" ]; then
+    echo "[信息] daemon.json 不存在，创建默认配置..."
+    cp -fv "${script_dir}/config/daemon.json" "/etc/docker/daemon.json"
+else
+    echo "[信息] 保留现有 /etc/docker/daemon.json（跳过覆盖）"
+fi
+echo ""
+
+# ---- 重启服务 ----
+echo "============================================"
+echo " 重启 Docker 服务..."
+echo "============================================"
+systemctl daemon-reload
+
+echo "[信息] 启动 containerd..."
+if systemctl start containerd.service; then
+    echo "      ✓ containerd 已启动"
+else
+    echo "[错误] containerd 启动失败！"
+    echo "       查看日志: journalctl -xeu containerd.service"
+    exit 1
+fi
+
+# 等待 containerd socket 就绪
+echo "[信息] 等待 containerd socket 就绪..."
+for i in $(seq 1 30); do
+    if [ -S /run/containerd/containerd.sock ]; then
+        echo "      ✓ containerd socket 已就绪"
+        break
+    fi
+    sleep 1
+done
+
+if [ ! -S /run/containerd/containerd.sock ]; then
+    echo "[错误] containerd 在 30 秒内未能就绪！"
+    exit 1
+fi
+
+echo "[信息] 重启 Docker..."
+if systemctl restart docker.service; then
+    echo "      ✓ Docker 已重启"
+    systemctl enable containerd.service 2>/dev/null || true
+    systemctl enable docker.service 2>/dev/null || true
+else
+    echo "[警告] restart 失败，尝试 start..."
+    if systemctl start docker.service; then
+        echo "      ✓ Docker 已启动"
+    else
+        echo "[错误] Docker 启动失败！"
+        echo "       查看日志: journalctl -xeu docker.service"
+        exit 1
+    fi
+fi
+echo ""
+
+# ---- 验证安装 ----
+echo "============================================"
+echo " 验证升级结果..."
+echo "============================================"
+echo ""
+
+if ! docker -v >/dev/null 2>&1; then
+    echo "[错误] 升级失败！docker 命令不可用。"
+    echo "       可以回滚备份文件: /usr/bin/*.bk.${cur_time}"
+    exit 1
+fi
+echo "--- Docker 版本 ---"
+docker -v
+
+if ! docker-compose -v >/dev/null 2>&1; then
+    echo "[警告] docker-compose 命令不可用"
+else
+    echo "--- Docker Compose 版本 ---"
+    docker-compose -v
+fi
+
+echo "--- containerd 版本 ---"
+containerd -v 2>/dev/null || echo "(containerd 命令未找到)"
+echo "--- runc 版本 ---"
+runc -v 2>/dev/null || echo "(runc 命令未找到)"
+
+if ! systemctl is-active --quiet docker.service; then
+    echo "[警告] Docker 服务处于非活跃状态！"
+else
+    echo "--- Docker 服务状态 ---"
+    systemctl status docker.service --no-pager -l 2>/dev/null | head -10
+fi
+
+echo ""
+echo "============================================"
+echo " Docker 升级到 __VERSION__ (__ARCH__) 完成！"
+echo " 旧版本文件备份在 /usr/bin/*.bk.${cur_time}"
+echo "============================================"
+UPGRADE_EOF
+
+    sed_inplace "s|__VERSION__|${safe_version}|g" "${output_dir}/upgrade.sh"
+    sed_inplace "s|__ARCH__|${target_arch}|g"    "${output_dir}/upgrade.sh"
+    chmod +x "${output_dir}/upgrade.sh"
 }
 
 # ---- 生成 uninstall.sh ----
@@ -941,9 +1207,11 @@ fi
 write_config_files
 echo "[4/4] 生成安装/卸载脚本..."
 write_install_sh
+write_upgrade_sh
 write_uninstall_sh
 write_readme
 echo "      ✓ install.sh"
+echo "      ✓ upgrade.sh"
 echo "      ✓ uninstall.sh"
 echo "      ✓ README.md"
 echo ""

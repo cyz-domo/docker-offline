@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       docker_version:
-        description: 'Docker 版本号（例如 29.6.1）'
+        description: 'Docker version (e.g. 29.6.1)'
         required: true
         type: string
         default: '29.6.1'
       arch:
-        description: '目标 CPU 架构'
+        description: 'Target CPU architecture'
         required: true
         type: choice
         options:
@@ -17,17 +17,17 @@ on:
           - aarch64
         default: 'x86_64'
       china_mirror:
-        description: '使用 ghproxy.com 代理下载 Docker Compose'
+        description: 'Use ghproxy.com to proxy GitHub downloads'
         required: false
         type: boolean
-        default: true
+        default: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build offline Docker package
         run: |
@@ -42,17 +42,19 @@ jobs:
             $MIRROR_FLAG \
             --non-interactive
 
-      - name: Package as zip
+      - name: Package as tar.gz (flat, no wrapper directory)
         run: |
           set -euo pipefail
-          cd offline-docker-*/
-          zip -r "../offline-docker-${{ inputs.docker_version }}-${{ inputs.arch }}.zip" .
-          cd ..
-          echo "Package size: $(du -sh offline-docker-*.zip | cut -f1)"
+          srcdir=$(echo offline-docker-*/)
+          pkg="offline-docker-${{ inputs.docker_version }}-${{ inputs.arch }}.tar.gz"
+          tar -czf "${pkg}" -C "${srcdir}" .
+          echo "Archive: ${pkg} ($(du -sh "${pkg}" | cut -f1))"
+          echo "Contents:"
+          tar tzf "${pkg}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: offline-docker-${{ inputs.docker_version }}-${{ inputs.arch }}
-          path: offline-docker-*.zip
+          path: offline-docker-*.tar.gz
           retention-days: 30
