@@ -81,7 +81,7 @@ export https_proxy=http://proxy:8080
 3. 填写参数：
    - **Docker 版本号**（如 `29.6.1`）
    - **目标架构**（`x86_64` 或 `aarch64`）
-   - **国内镜像加速**（勾选后 Compose 走 ghproxy.com）
+   - **国内镜像加速**（勾选后 Compose 走 ghproxy.com，GitHub action不用勾选，仅用于本地构建）
 4. 等待构建完成，下载 Artifact 即可
 
 构建产物为 `offline-docker-<version>-<arch>.zip`，解压后直接放到目标机器 `sudo bash install.sh`。
