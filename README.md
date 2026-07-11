@@ -79,9 +79,12 @@ export https_proxy=http://proxy:8080
 1. 进入仓库 **Actions** → **Build Offline Docker Package**
 2. 点击 **Run workflow**
 3. 填写参数：
-   - **Docker 版本号**（如 `29.6.1`）
+   - **自定义 Docker 版本**（可留空；填写后优先生效）
+   - **稳定版快捷选择**（未填写自定义版本时使用）
    - **目标架构**（`x86_64` 或 `aarch64`）
    - **国内镜像加速**（勾选后 Compose 走 ghproxy.com，GitHub action不用勾选，仅用于本地构建）
 4. 等待构建完成，下载 Artifact 即可
 
 构建产物为 `offline-docker-<version>-<arch>.zip`，解压后直接放到目标机器 `sudo bash install.sh`。
+
+离线包中还包含 `migrate-data-root.sh`，可在目标机器上交互式迁移 Docker 数据目录；脚本会询问新的目录位置，目录不存在时自动创建。

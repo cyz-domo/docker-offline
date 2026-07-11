@@ -975,8 +975,16 @@ UNINSTALL_EOF
     chmod +x "${output_dir}/uninstall.sh"
 }
 
+# ---- 生成 migrate-data-root.sh ----
+write_migrate_data_root_sh() {
+    write_migrate_data_root_sh_v2
+}
+
 # ---- 生成 README.md ----
 write_readme() {
+    write_readme_v2
+    return
+
     local safe_version safe_arch compose_display
     safe_version=$(sed_escape "$selected_version")
     safe_arch="$target_arch"
@@ -1044,6 +1052,348 @@ sudo bash uninstall.sh
 2. 如果目标机器已安装 Docker，脚本会自动备份旧文件（\`.bk.时间戳\` 后缀）
 3. 安装完成后 Docker 服务会自动启动并设为开机自启
 4. 卸载脚本**不会删除** Docker 数据目录（/var/lib/docker），仅移除二进制和 systemd 配置
+README_EOF
+
+    sed_inplace "s|__DOCKER_VERSION__|${safe_version}|g" "${output_dir}/README.md"
+    sed_inplace "s|__ARCH__|${safe_arch}|g"                "${output_dir}/README.md"
+    sed_inplace "s|__COMPOSE_VERSION__|${compose_display}|g" "${output_dir}/README.md"
+}
+
+# ---- Generate migrate-data-root.sh (v2) ----
+write_migrate_data_root_sh_v2() {
+    cat > "${output_dir}/migrate-data-root.sh" << 'MIGRATE_EOF'
+#!/bin/bash
+##############################################################################
+# Docker data-root migration script
+# Usage: sudo bash migrate-data-root.sh
+##############################################################################
+
+set -euo pipefail
+
+cur_time=$(date "+%Y%m%d%H%M%S")
+daemon_json="${DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}"
+docker_data_root_default="${DOCKER_DATA_ROOT_DEFAULT:-/var/lib/docker}"
+
+echo "============================================"
+echo " Docker data-root migration"
+echo "============================================"
+echo ""
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "[ERROR] Run this script with root or sudo."
+    exit 1
+fi
+
+if ! command -v systemctl >/dev/null 2>&1; then
+    echo "[ERROR] systemctl is required for a safe Docker data-root migration."
+    exit 1
+fi
+
+for cmd in awk cp dirname find grep mkdir mktemp mv rm sed; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[ERROR] Missing required command: $cmd"
+        exit 1
+    fi
+done
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+detect_current_data_root() {
+    if [ -f "$daemon_json" ]; then
+        awk -F'"' '/"data-root"/ {print $4; exit}' "$daemon_json"
+    fi
+}
+
+write_daemon_json_with_data_root() {
+    local target_root="$1"
+    local escaped_target
+    local tmp_json
+    escaped_target=$(json_escape "$target_root")
+    tmp_json=$(mktemp)
+
+    if [ -f "$daemon_json" ]; then
+        awk -v new_root="$escaped_target" '
+            BEGIN { replaced = 0 }
+            {
+                if (!replaced && $0 ~ /"data-root"[[:space:]]*:/) {
+                    sub(/"data-root"[[:space:]]*:[[:space:]]*"[^"]*"/, "\"data-root\": \"" new_root "\"")
+                    replaced = 1
+                }
+                lines[NR] = $0
+            }
+            END {
+                if (NR == 0) {
+                    print "{"
+                    print "  \"data-root\": \"" new_root "\""
+                    print "}"
+                    exit
+                }
+
+                if (replaced) {
+                    for (i = 1; i <= NR; i++) {
+                        print lines[i]
+                    }
+                    exit
+                }
+
+                inserted = 0
+                for (i = 1; i <= NR; i++) {
+                    print lines[i]
+                    if (!inserted && lines[i] ~ /^[[:space:]]*\{[[:space:]]*$/) {
+                        next_line = ""
+                        for (j = i + 1; j <= NR; j++) {
+                            if (lines[j] ~ /^[[:space:]]*$/) {
+                                continue
+                            }
+                            next_line = lines[j]
+                            break
+                        }
+                        if (next_line != "" && next_line !~ /^[[:space:]]*}/) {
+                            print "  \"data-root\": \"" new_root "\"," 
+                        } else {
+                            print "  \"data-root\": \"" new_root "\""
+                        }
+                        inserted = 1
+                    }
+                }
+            }
+        ' "$daemon_json" > "$tmp_json"
+    else
+        cat > "$tmp_json" << EOF
+{
+  "data-root": "$target_root"
+}
+EOF
+    fi
+
+    mv "$tmp_json" "$daemon_json"
+}
+
+current_data_root="$(detect_current_data_root || true)"
+current_data_root="${current_data_root:-$docker_data_root_default}"
+current_data_root=$(printf '%s' "$current_data_root" | sed 's:/*$::')
+
+echo "[INFO] Current Docker data directory: ${current_data_root}"
+read -r -p "Enter new Docker data directory (for example /data/docker): " target_data_root
+
+if [ -z "${target_data_root}" ]; then
+    echo "[ERROR] Target directory cannot be empty."
+    exit 1
+fi
+
+case "$target_data_root" in
+    /*) ;;
+    *)
+        echo "[ERROR] Target directory must be an absolute path."
+        exit 1
+        ;;
+esac
+
+target_data_root=$(printf '%s' "$target_data_root" | sed 's:/*$::')
+
+if [ "$target_data_root" = "$current_data_root" ]; then
+    echo "[INFO] Target directory matches the current data directory. Nothing to do."
+    exit 0
+fi
+
+if [ ! -d "$current_data_root" ]; then
+    echo "[ERROR] Current data directory does not exist: ${current_data_root}"
+    exit 1
+fi
+
+if [ ! -d "$target_data_root" ]; then
+    echo "[INFO] Target directory does not exist. Creating: ${target_data_root}"
+    mkdir -p "$target_data_root"
+fi
+
+if [ -n "$(find "$target_data_root" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+    echo "[WARN] Target directory is not empty: ${target_data_root}"
+    echo "[WARN] Docker data will be copied into this directory and files may be overwritten."
+    read -r -p "Continue? [y/N] " confirm_nonempty
+    case "$confirm_nonempty" in
+        [yY][eE][sS]|[yY]) ;;
+        *) echo "Cancelled."; exit 0 ;;
+    esac
+fi
+
+echo ""
+echo "Migration plan:"
+echo "  Current directory: ${current_data_root}"
+echo "  Target directory:  ${target_data_root}"
+echo "  Mode: stop services, copy data, update daemon.json, restart Docker"
+echo ""
+
+read -r -p "Proceed with migration? [y/N] " confirm_start
+case "$confirm_start" in
+    [yY][eE][sS]|[yY]) ;;
+    *) echo "Cancelled."; exit 0 ;;
+esac
+
+mkdir -p "$(dirname "$daemon_json")"
+
+backup_daemon_json=""
+if [ -f "$daemon_json" ]; then
+    backup_daemon_json="${daemon_json}.bk.${cur_time}"
+    cp -vf "$daemon_json" "$backup_daemon_json"
+fi
+
+rollback_needed=1
+rollback() {
+    local status=$?
+    if [ "$rollback_needed" -eq 1 ]; then
+        echo "[WARN] Migration failed. Restoring previous Docker configuration..."
+        if [ -n "$backup_daemon_json" ] && [ -f "$backup_daemon_json" ]; then
+            cp -vf "$backup_daemon_json" "$daemon_json" || true
+        elif [ -f "$daemon_json" ]; then
+            rm -f "$daemon_json" || true
+        fi
+        systemctl daemon-reload || true
+        systemctl start containerd.service || true
+        systemctl start docker.service || true
+    fi
+    exit "$status"
+}
+trap rollback EXIT
+
+echo "[INFO] Stopping Docker and containerd..."
+systemctl stop docker.service 2>/dev/null || true
+systemctl stop containerd.service 2>/dev/null || true
+
+echo "[INFO] Copying Docker data..."
+if command -v rsync >/dev/null 2>&1; then
+    rsync -aHAX --delete --info=progress2 "${current_data_root}/" "${target_data_root}/"
+else
+    echo "[INFO] rsync not found. Falling back to cp -a without progress output."
+    cp -a "${current_data_root}/." "$target_data_root/"
+fi
+
+if [ ! -e "$target_data_root/image" ] && [ ! -e "$target_data_root/containers" ] && [ -n "$(find "$current_data_root" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+    echo "[ERROR] Target directory does not appear to contain copied Docker data."
+    exit 1
+fi
+
+write_daemon_json_with_data_root "$target_data_root"
+
+echo "[INFO] Starting containerd and Docker..."
+systemctl daemon-reload
+systemctl start containerd.service
+systemctl start docker.service
+
+echo "[INFO] Verifying Docker Root Dir..."
+docker_root_dir=$(docker info 2>/dev/null | awk -F': ' '/Docker Root Dir/ {print $2; exit}') || true
+if [ "$docker_root_dir" != "$target_data_root" ]; then
+    echo "[ERROR] Verification failed. Current Docker Root Dir: ${docker_root_dir:-unknown}"
+    echo "        Check: journalctl -xeu docker.service"
+    exit 1
+fi
+
+rollback_needed=0
+trap - EXIT
+
+echo ""
+echo "============================================"
+echo " Migration completed"
+echo " New data directory: ${target_data_root}"
+echo " Original directory preserved: ${current_data_root}"
+if [ -n "$backup_daemon_json" ]; then
+    echo " daemon.json backup: ${backup_daemon_json}"
+fi
+echo "============================================"
+MIGRATE_EOF
+
+    chmod +x "${output_dir}/migrate-data-root.sh"
+}
+
+# ---- Generate README.md (v2) ----
+write_readme_v2() {
+    local safe_version safe_arch compose_display
+    safe_version=$(sed_escape "$selected_version")
+    safe_arch="$target_arch"
+
+    if [ -n "$compose_version" ]; then
+        compose_display="$compose_version"
+    else
+        compose_display="latest (see https://github.com/docker/compose/releases)"
+    fi
+
+    cat > "${output_dir}/README.md" << README_EOF
+# Docker __DOCKER_VERSION__ Offline Package
+
+## Environment
+
+- **Architecture**: __ARCH__
+- **OS**: Linux with \`systemd\` support, such as Ubuntu 22.04 or CentOS 7
+- **Docker Version**: __DOCKER_VERSION__
+- **Docker Compose**: __COMPOSE_VERSION__
+
+## Directory Layout
+
+\`\`\`text
+offline-docker-__DOCKER_VERSION__/
+|-- install.sh
+|-- upgrade.sh
+|-- migrate-data-root.sh
+|-- uninstall.sh
+|-- README.md
+|-- config/
+|   |-- daemon.json
+|   |-- docker.service
+|   \`-- containerd.service
+\`-- packages/
+    |-- docker-__DOCKER_VERSION__.tgz
+    \`-- docker-compose-linux
+\`\`\`
+
+## Usage
+
+### Install
+
+\`\`\`bash
+cd offline-docker-__DOCKER_VERSION__
+sudo bash install.sh
+\`\`\`
+
+### Upgrade
+
+\`\`\`bash
+cd offline-docker-__DOCKER_VERSION__
+sudo bash upgrade.sh
+\`\`\`
+
+### Migrate Docker Data Directory
+
+\`\`\`bash
+cd offline-docker-__DOCKER_VERSION__
+sudo bash migrate-data-root.sh
+\`\`\`
+
+The migration script prompts for a new Docker data directory, creates it if needed, copies the current Docker data, updates \`/etc/docker/daemon.json\`, restarts Docker, and verifies the new \`Docker Root Dir\`. The original data directory is preserved for rollback.
+
+### Uninstall
+
+\`\`\`bash
+sudo bash uninstall.sh
+\`\`\`
+
+## Default daemon.json
+
+The package ships with a minimal default configuration:
+
+- \`log-driver\`: \`json-file\`
+- \`log-opts.max-size\`: \`100m\`
+- \`log-opts.max-file\`: \`3\`
+- \`live-restore\`: \`true\`
+- \`data-root\`: \`/var/lib/docker\`
+
+## Notes
+
+1. Run all scripts with \`root\` or \`sudo\`.
+2. \`install.sh\` and \`upgrade.sh\` back up existing Docker binaries and config files before replacing them.
+3. \`upgrade.sh\` keeps the existing \`/etc/docker/daemon.json\` when present.
+4. \`migrate-data-root.sh\` restores the previous \`daemon.json\` automatically if migration fails.
+5. \`uninstall.sh\` does not delete Docker data directories.
 README_EOF
 
     sed_inplace "s|__DOCKER_VERSION__|${safe_version}|g" "${output_dir}/README.md"
@@ -1208,8 +1558,9 @@ write_config_files
 echo "[4/4] 生成安装/卸载脚本..."
 write_install_sh
 write_upgrade_sh
+write_migrate_data_root_sh_v2
 write_uninstall_sh
-write_readme
+write_readme_v2
 echo "      ✓ install.sh"
 echo "      ✓ upgrade.sh"
 echo "      ✓ uninstall.sh"

@@ -1,12 +1,27 @@
 name: Build Offline Docker Package
+run-name: Build Docker ${{ inputs.custom_docker_version != '' && inputs.custom_docker_version || inputs.docker_version }} (${{ inputs.arch }})
+
+env:
+  EFFECTIVE_DOCKER_VERSION: ${{ inputs.custom_docker_version != '' && inputs.custom_docker_version || inputs.docker_version }}
 
 on:
   workflow_dispatch:
     inputs:
-      docker_version:
-        description: 'Docker version (e.g. 29.6.1)'
-        required: true
+      custom_docker_version:
+        description: 'Custom Docker version (leave empty to use preset below)'
+        required: false
         type: string
+      docker_version:
+        description: 'Stable Docker version shortcut'
+        required: true
+        type: choice
+        options:
+          - '29.6.1'
+          - '24.0.6'
+          - '23.0.6'
+          - '20.10.24'
+          - '19.03.15'
+          - '18.09.9'
         default: '29.6.1'
       arch:
         description: 'Target CPU architecture'
@@ -24,6 +39,7 @@ on:
 
 jobs:
   build:
+    name: Build Docker ${{ env.EFFECTIVE_DOCKER_VERSION }} (${{ inputs.arch }})
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,7 +53,7 @@ jobs:
             MIRROR_FLAG="--china-mirror"
           fi
           bash build_offline.sh \
-            --version "${{ inputs.docker_version }}" \
+            --version "${{ env.EFFECTIVE_DOCKER_VERSION }}" \
             --arch "${{ inputs.arch }}" \
             $MIRROR_FLAG \
             --non-interactive
@@ -46,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           srcdir=$(echo offline-docker-*/)
-          pkg="offline-docker-${{ inputs.docker_version }}-${{ inputs.arch }}.tar.gz"
+          pkg="offline-docker-${{ env.EFFECTIVE_DOCKER_VERSION }}-${{ inputs.arch }}.tar.gz"
           tar -czf "${pkg}" -C "${srcdir}" .
           echo "Archive: ${pkg} ($(du -sh "${pkg}" | cut -f1))"
           echo "Contents:"
@@ -55,6 +71,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: offline-docker-${{ inputs.docker_version }}-${{ inputs.arch }}
+          name: offline-docker-${{ env.EFFECTIVE_DOCKER_VERSION }}-${{ inputs.arch }}
           path: offline-docker-*.tar.gz
           retention-days: 30
