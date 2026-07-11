@@ -39,7 +39,7 @@ on:
 
 jobs:
   build:
-    name: Build Docker ${{ env.EFFECTIVE_DOCKER_VERSION }} (${{ inputs.arch }})
+    name: Build offline Docker package
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
