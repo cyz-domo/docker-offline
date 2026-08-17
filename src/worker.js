@@ -43,13 +43,13 @@ export class BuildQueue {
   async enqueue(input) {
     const now = Date.now();
     const state = (await this.state.storage.get("state")) || { active: null, queue: [] };
-    const rateKey = `rate:${input.clientIp || "unknown"}`;
-    const recent = (await this.state.storage.get(rateKey) || []).filter((time) => now - time < 60 * 60 * 1000);
-    if (recent.length >= 3) return { accepted: false, status: 429, error: "请求过于频繁，请一小时后再试" };
-    recent.push(now);
-    await this.state.storage.put(rateKey, recent, { expirationTtl: 60 * 60 });
     const existing = await this.findExisting(input.version, input.arch, input.chinaMirror);
     if (existing) return { accepted: true, reused: true, job: publicJob(existing) };
+    const rateKey = `rate:v2:${input.clientIp || "unknown"}`;
+    const recent = (await this.state.storage.get(rateKey) || []).filter((time) => now - time < 60 * 60 * 1000);
+    if (recent.length >= Number(this.env.MAX_REQUESTS_PER_HOUR || 10)) return { accepted: false, status: 429, error: "请求过于频繁，请稍后再试" };
+    recent.push(now);
+    await this.state.storage.put(rateKey, recent, { expirationTtl: 60 * 60 });
     if (state.queue.length >= Number(this.env.MAX_QUEUE_SIZE || 3) && state.active) {
       return { accepted: false, status: 429, error: "当前构建队列已满，请稍后重试" };
     }

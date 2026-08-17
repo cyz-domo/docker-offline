@@ -8,6 +8,7 @@ GITHUB_OWNER = "cyz-domo"
 GITHUB_REPO = "docker-offline"
 GITHUB_REF = "main"
 MAX_QUEUE_SIZE = "3"
+MAX_REQUESTS_PER_HOUR = "10"
 TURNSTILE_SITE_KEY = "0x4AAAAAAEShIeyc3zcZfKzf"
 
 [[durable_objects.bindings]]
