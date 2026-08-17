@@ -1,5 +1,5 @@
 name: Build Offline Docker Package
-run-name: Build Docker ${{ inputs.custom_docker_version != '' && inputs.custom_docker_version || inputs.docker_version }} (${{ inputs.arch }})
+run-name: Build Docker ${{ inputs.custom_docker_version != '' && inputs.custom_docker_version || inputs.docker_version }} (${{ inputs.arch }}) [${{ inputs.request_id || github.run_id }}]
 
 env:
   EFFECTIVE_DOCKER_VERSION: ${{ inputs.custom_docker_version != '' && inputs.custom_docker_version || inputs.docker_version }}
@@ -36,6 +36,14 @@ on:
         required: false
         type: boolean
         default: false
+      request_id:
+        description: 'Worker request ID (leave empty for manual runs)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  actions: read
 
 jobs:
   build:
@@ -74,3 +82,17 @@ jobs:
           name: offline-docker-${{ env.EFFECTIVE_DOCKER_VERSION }}-${{ inputs.arch }}
           path: offline-docker-*.tar.gz
           retention-days: 30
+
+      - name: Publish public Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: offline-${{ inputs.request_id || github.run_id }}
+          name: Docker offline package ${{ env.EFFECTIVE_DOCKER_VERSION }} / ${{ inputs.arch }}
+          body: |
+            Docker 离线安装包
+
+            - Docker version: `${{ env.EFFECTIVE_DOCKER_VERSION }}`
+            - Architecture: `${{ inputs.arch }}`
+            - Build run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: offline-docker-*.tar.gz
+          prerelease: true

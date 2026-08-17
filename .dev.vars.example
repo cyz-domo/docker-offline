@@ -1,0 +1,8 @@
+GITHUB_APP_ID = "123456"
+GITHUB_APP_PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----"
+GITHUB_INSTALLATION_ID = "12345678"
+GITHUB_OWNER = "your-owner"
+GITHUB_REPO = "docker-offline"
+GITHUB_REF = "main"
+TURNSTILE_SECRET = "replace-me"
+TURNSTILE_SITE_KEY = "replace-me"

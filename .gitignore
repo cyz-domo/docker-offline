@@ -4,3 +4,7 @@ packages/docker-ce/docker/
 packages/docker-ce/docker-compose-*
 offline-docker-*/
 *.zip
+node_modules/
+.wrangler/
+.dev.vars
+*.private-key.pem

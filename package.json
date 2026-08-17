@@ -1,0 +1,16 @@
+{
+  "name": "docker-offline-builder-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "jose": "^6.0.10"
+  },
+  "devDependencies": {
+    "wrangler": "^4.30.0"
+  }
+}

@@ -1,0 +1,22 @@
+name = "docker-offline-builder"
+main = "src/worker.js"
+compatibility_date = "2026-08-17"
+
+[vars]
+GITHUB_WORKFLOW_FILE = "build.yml"
+GITHUB_OWNER = "cyz-domo"
+GITHUB_REPO = "docker-offline"
+GITHUB_REF = "main"
+MAX_QUEUE_SIZE = "3"
+TURNSTILE_SITE_KEY = "0x4AAAAAAEShIeyc3zcZfKzf"
+
+[[durable_objects.bindings]]
+name = "BUILD_QUEUE"
+class_name = "BuildQueue"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BuildQueue"]
+
+[triggers]
+crons = ["17 3 * * *"]
