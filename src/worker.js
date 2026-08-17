@@ -30,7 +30,8 @@ export class BuildQueue {
       try {
         releases = (await githubFetch(this.env, `/repos/${this.env.GITHUB_OWNER}/${this.env.GITHUB_REPO}/releases?per_page=100`)).filter((release) => release.tag_name.startsWith("offline-")).map((release) => ({ name: release.name, createdAt: release.created_at, url: release.html_url, downloadUrl: release.assets?.[0]?.browser_download_url || null }));
       } catch (_error) {}
-      return json({ jobs, releases });
+      const jobHistory = jobs.map((job) => ({ name: `${job.version} / ${job.arch}（${job.status}）`, createdAt: new Date(job.createdAt).toISOString(), url: job.runUrl, downloadUrl: job.downloadUrl }));
+      return json({ jobs, releases: [...releases, ...jobHistory] });
     }
     if (request.method === "POST" && url.pathname === "/cleanup") {
       await this.cleanup();
