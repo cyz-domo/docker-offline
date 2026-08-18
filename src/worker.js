@@ -4,6 +4,10 @@ const VERSION_RE = /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?$/;
 const ARCHES = new Set(["x86_64", "aarch64"]);
 const MAX_BODY_BYTES = 16 * 1024;
 const JOB_TTL_MS = 15 * 24 * 60 * 60 * 1000;
+const JOB_REFRESH_COOLDOWN_MS = 5 * 1000;
+const HISTORY_CACHE_TTL_MS = 15 * 1000;
+
+let installationTokenCache = { token: null, expiresAt: 0 };
 
 export class BuildQueue {
   constructor(state, env) {
@@ -24,6 +28,9 @@ export class BuildQueue {
       return job ? json(publicJob(job)) : json({ error: "任务不存在或已过期" }, 404);
     }
     if (request.method === "GET" && url.pathname === "/history") {
+      const now = Date.now();
+      const cachedHistory = await this.state.storage.get("historyCache");
+      if (cachedHistory && now - cachedHistory.createdAt < HISTORY_CACHE_TTL_MS) return json(cachedHistory.payload);
       const entries = await this.state.storage.list({ prefix: "job:" });
       const recentJobs = [...entries.values()].filter((job) => Date.now() - job.createdAt < JOB_TTL_MS).sort((a, b) => b.createdAt - a.createdAt).slice(0, 100);
       const refreshedJobs = [];
@@ -35,7 +42,9 @@ export class BuildQueue {
         releases = (await githubFetch(this.env, `/repos/${this.env.GITHUB_OWNER}/${this.env.GITHUB_REPO}/releases?per_page=100`)).filter((release) => release.tag_name.startsWith("offline-") && !jobReleaseTags.has(release.tag_name)).map((release) => ({ name: release.name, createdAt: release.created_at, url: release.html_url, downloadUrl: release.assets?.[0]?.browser_download_url || null }));
       } catch (_error) {}
       const jobHistory = jobs.map((job) => ({ name: `${job.version} / ${job.arch}（${job.status}${job.progress && job.status === "building" ? ` · ${job.progress.percent}% · ${job.progress.step}` : ""}）`, createdAt: new Date(job.createdAt).toISOString(), url: job.runUrl, downloadUrl: job.downloadUrl, status: job.status, progress: job.progress || null }));
-      return json({ jobs, releases: [...releases, ...jobHistory] });
+      const payload = { jobs, releases: [...releases, ...jobHistory] };
+      await this.state.storage.put("historyCache", { createdAt: now, payload }, { expirationTtl: 30 });
+      return json(payload);
     }
     if (request.method === "POST" && url.pathname === "/cleanup") {
       await this.cleanup();
@@ -111,6 +120,10 @@ export class BuildQueue {
 
   async refresh(job) {
     if (!job || !["building", "starting"].includes(job.status)) return job;
+    const now = Date.now();
+    if (job.lastCheckedAt && now - job.lastCheckedAt < JOB_REFRESH_COOLDOWN_MS) return job;
+    job.lastCheckedAt = now;
+    await this.state.storage.put(`job:${job.id}`, job);
     try {
       const run = await findRun(this.env, job.requestId);
       if (!run) return job;
@@ -166,8 +179,8 @@ export default {
     if (url.pathname === "/") return new Response(blueTheme(modernIndexHtml(env)), { headers: { "content-type": "text/html; charset=UTF-8" } });
     if (url.pathname === "/history") return new Response(blueTheme(modernHistoryHtml()), { headers: { "content-type": "text/html; charset=UTF-8" } });
     if (url.pathname === "/api/jobs" && request.method === "POST") return enqueue(request, env);
-    if (url.pathname.startsWith("/api/jobs/") && request.method === "GET") return proxyQueue(request, env, `jobs/${url.pathname.slice(10)}`);
-    if (url.pathname === "/api/history" && request.method === "GET") return proxyQueue(request, env, "history");
+    if (url.pathname.startsWith("/api/jobs/") && request.method === "GET") return cachedProxyQueue(request, env, `jobs/${url.pathname.slice(10)}`, 5);
+    if (url.pathname === "/api/history" && request.method === "GET") return cachedProxyQueue(request, env, "history", 15);
     return new Response("Not found", { status: 404 });
   },
   async scheduled(_event, env, ctx) {
@@ -194,6 +207,20 @@ async function proxyQueue(request, env, path) {
   return env.BUILD_QUEUE.get(id).fetch(new Request(`https://queue/${path}`, init));
 }
 
+async function cachedProxyQueue(request, env, path, maxAge) {
+  const cache = caches.default;
+  const cacheKey = new Request(new URL(request.url).toString(), { method: "GET" });
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached;
+  const response = await proxyQueue(request, env, path);
+  if (!response.ok) return response;
+  const headers = new Headers(response.headers);
+  headers.set("cache-control", `public, max-age=${maxAge}, s-maxage=${maxAge}`);
+  const cacheable = new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  await cache.put(cacheKey, cacheable.clone());
+  return cacheable;
+}
+
 function publicJob(job) {
   return { id: job.id, version: job.version, arch: job.arch, chinaMirror: job.chinaMirror, status: job.status, progress: job.progress || null, runUrl: job.runUrl || null, downloadUrl: job.downloadUrl || null, releaseUrl: job.releaseUrl || null, error: job.error || null, createdAt: job.createdAt, updatedAt: job.updatedAt };
 }
@@ -202,11 +229,14 @@ function json(data, status = 200) { return new Response(JSON.stringify(data), { 
 function corsHeaders() { return { "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type" }; }
 
 async function githubToken(env) {
+  if (installationTokenCache.token && installationTokenCache.expiresAt > Date.now() + 60 * 1000) return installationTokenCache.token;
   const key = await importPKCS8(env.GITHUB_APP_PRIVATE_KEY.replace(/\\n/g, "\n"), "RS256");
   const jwt = await new SignJWT({}).setProtectedHeader({ alg: "RS256", typ: "JWT" }).setIssuedAt().setExpirationTime("10m").setIssuer(env.GITHUB_APP_ID).sign(key);
   const response = await fetch(`https://api.github.com/app/installations/${env.GITHUB_INSTALLATION_ID}/access_tokens`, { method: "POST", headers: githubHeaders(jwt) });
   if (!response.ok) throw new Error(`GitHub App 授权失败（${response.status}）`);
-  return (await response.json()).token;
+  const data = await response.json();
+  installationTokenCache = { token: data.token, expiresAt: Date.now() + 50 * 60 * 1000 };
+  return data.token;
 }
 
 function githubHeaders(token) { return { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "docker-offline-builder" }; }
