@@ -39,9 +39,9 @@ export class BuildQueue {
       const jobReleaseTags = new Set(recentJobs.map((job) => `offline-${job.requestId}`));
       let releases = [];
       try {
-        releases = (await githubFetch(this.env, `/repos/${this.env.GITHUB_OWNER}/${this.env.GITHUB_REPO}/releases?per_page=100`)).filter((release) => release.tag_name.startsWith("offline-") && !jobReleaseTags.has(release.tag_name)).map((release) => ({ name: release.name, createdAt: release.created_at, url: release.html_url, downloadUrl: release.assets?.[0]?.browser_download_url || null }));
+        releases = (await githubFetch(this.env, `/repos/${this.env.GITHUB_OWNER}/${this.env.GITHUB_REPO}/releases?per_page=100`)).filter((release) => release.tag_name.startsWith("offline-") && !jobReleaseTags.has(release.tag_name)).map((release) => ({ ...releaseSummary(release), name: release.name, createdAt: release.created_at, url: release.html_url }));
       } catch (_error) {}
-      const jobHistory = jobs.map((job) => ({ name: `${job.version} / ${job.arch}（${job.status}${job.progress && job.status === "building" ? ` · ${job.progress.percent}% · ${job.progress.step}` : ""}）`, createdAt: new Date(job.createdAt).toISOString(), url: job.runUrl, downloadUrl: job.downloadUrl, status: job.status, progress: job.progress || null }));
+      const jobHistory = jobs.map((job) => ({ name: `${job.version} / ${job.arch}（${job.status}${job.progress && job.status === "building" ? ` · ${job.progress.percent}% · ${job.progress.step}` : ""}）`, createdAt: new Date(job.createdAt).toISOString(), url: job.runUrl, downloadUrl: job.downloadUrl, checksumUrl: job.checksumUrl, status: job.status, progress: job.progress || null }));
       const payload = { jobs, releases: [...releases, ...jobHistory] };
       await this.state.storage.put("historyCache", { createdAt: now, payload }, { expirationTtl: 30 });
       return json(payload);
@@ -140,7 +140,7 @@ export class BuildQueue {
         const release = await findRelease(this.env, job.requestId);
         if (release) {
           job.status = "success";
-          job.downloadUrl = release.assets?.[0]?.browser_download_url;
+          Object.assign(job, releaseSummary(release));
           job.releaseUrl = release.html_url;
         }
       } else {
@@ -226,8 +226,14 @@ async function cachedProxyQueue(request, env, path, maxAge) {
   return cacheable;
 }
 
+function releaseSummary(release) {
+  const packageAsset = release.assets?.find((asset) => asset.name.endsWith(".tar.gz"));
+  const checksumAsset = release.assets?.find((asset) => asset.name.endsWith(".tar.gz.sha256"));
+  return { downloadUrl: packageAsset?.browser_download_url || null, checksumUrl: checksumAsset?.browser_download_url || null, releaseUrl: release.html_url || null };
+}
+
 function publicJob(job) {
-  return { id: job.id, version: job.version, arch: job.arch, chinaMirror: job.chinaMirror, status: job.status, progress: job.progress || null, runUrl: job.runUrl || null, downloadUrl: job.downloadUrl || null, releaseUrl: job.releaseUrl || null, error: job.error || null, createdAt: job.createdAt, updatedAt: job.updatedAt };
+  return { id: job.id, version: job.version, arch: job.arch, chinaMirror: job.chinaMirror, status: job.status, progress: job.progress || null, runUrl: job.runUrl || null, downloadUrl: job.downloadUrl || null, checksumUrl: job.checksumUrl || null, releaseUrl: job.releaseUrl || null, error: job.error || null, createdAt: job.createdAt, updatedAt: job.updatedAt };
 }
 
 function json(data, status = 200) { return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders(), "content-type": "application/json; charset=UTF-8" } }); }
