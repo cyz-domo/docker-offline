@@ -9,7 +9,9 @@ GITHUB_REPO = "docker-offline"
 GITHUB_REF = "main"
 MAX_QUEUE_SIZE = "3"
 MAX_REQUESTS_PER_HOUR = "10"
+MAX_REQUESTS_PER_DAY = "50"
 TURNSTILE_SITE_KEY = "0x4AAAAAAEShIeyc3zcZfKzf"
+TURNSTILE_HOSTNAMES = "docker-offline-builder.gcst4tqsdm.workers.dev"
 
 [[durable_objects.bindings]]
 name = "BUILD_QUEUE"

@@ -1,9 +1,6 @@
 name: Build Offline Docker Package
 run-name: Build Docker ${{ inputs.custom_docker_version != '' && inputs.custom_docker_version || inputs.docker_version }} (${{ inputs.arch }}) [${{ inputs.request_id || github.run_id }}]
 
-env:
-  EFFECTIVE_DOCKER_VERSION: ${{ inputs.custom_docker_version != '' && inputs.custom_docker_version || inputs.docker_version }}
-
 on:
   workflow_dispatch:
     inputs:
@@ -41,58 +38,112 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: write
-  actions: read
+permissions: {}
 
 jobs:
   build:
     name: Build offline Docker package
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      effective_version: ${{ steps.params.outputs.effective_version }}
+      target_arch: ${{ steps.params.outputs.target_arch }}
+      request_id: ${{ steps.params.outputs.request_id }}
+    env:
+      CUSTOM_DOCKER_VERSION: ${{ inputs.custom_docker_version }}
+      DOCKER_VERSION: ${{ inputs.docker_version }}
+      TARGET_ARCH: ${{ inputs.arch }}
+      CHINA_MIRROR: ${{ inputs.china_mirror }}
+      REQUEST_ID: ${{ inputs.request_id }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Validate and resolve inputs
+        id: params
+        shell: bash
+        run: |
+          set -euo pipefail
+          effective_version="${CUSTOM_DOCKER_VERSION:-}"
+          if [ -z "$effective_version" ]; then
+            effective_version="$DOCKER_VERSION"
+          fi
+          if [[ ! "$effective_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]] || [ "${#effective_version}" -gt 32 ]; then
+            echo "Invalid Docker version" >&2
+            exit 1
+          fi
+          case "$TARGET_ARCH" in
+            x86_64|aarch64) ;;
+            *) echo "Invalid architecture" >&2; exit 1 ;;
+          esac
+          request_id="${REQUEST_ID:-$GITHUB_RUN_ID}"
+          if [[ ! "$request_id" =~ ^[a-zA-Z0-9_-]{1,64}$ ]]; then
+            echo "Invalid request ID" >&2
+            exit 1
+          fi
+          printf 'effective_version=%s\n' "$effective_version" >> "$GITHUB_OUTPUT"
+          printf 'target_arch=%s\n' "$TARGET_ARCH" >> "$GITHUB_OUTPUT"
+          printf 'request_id=%s\n' "$request_id" >> "$GITHUB_OUTPUT"
+          printf 'EFFECTIVE_DOCKER_VERSION=%s\n' "$effective_version" >> "$GITHUB_ENV"
 
       - name: Build offline Docker package
         run: |
           set -euo pipefail
-          MIRROR_FLAG=""
-          if [ "${{ inputs.china_mirror }}" = "true" ]; then
-            MIRROR_FLAG="--china-mirror"
+          mirror_flag=()
+          if [ "$CHINA_MIRROR" = "true" ]; then
+            mirror_flag=(--china-mirror)
           fi
           bash build_offline.sh \
-            --version "${{ env.EFFECTIVE_DOCKER_VERSION }}" \
-            --arch "${{ inputs.arch }}" \
-            $MIRROR_FLAG \
+            --version "$EFFECTIVE_DOCKER_VERSION" \
+            --arch "$TARGET_ARCH" \
+            "${mirror_flag[@]}" \
             --non-interactive
 
       - name: Package as tar.gz (flat, no wrapper directory)
         run: |
           set -euo pipefail
-          srcdir=$(echo offline-docker-*/)
-          pkg="offline-docker-${{ env.EFFECTIVE_DOCKER_VERSION }}-${{ inputs.arch }}.tar.gz"
-          tar -czf "${pkg}" -C "${srcdir}" .
-          echo "Archive: ${pkg} ($(du -sh "${pkg}" | cut -f1))"
-          echo "Contents:"
-          tar tzf "${pkg}"
+          srcdir=$(find . -maxdepth 1 -type d -name 'offline-docker-*' -print -quit)
+          [ -n "$srcdir" ]
+          pkg="offline-docker-${EFFECTIVE_DOCKER_VERSION}-${TARGET_ARCH}.tar.gz"
+          tar -czf "$pkg" -C "$srcdir" .
+          sha256sum "$pkg" > "$pkg.sha256"
+          echo "Archive: $pkg ($(du -sh "$pkg" | cut -f1))"
+          tar tzf "$pkg"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: offline-docker-${{ env.EFFECTIVE_DOCKER_VERSION }}-${{ inputs.arch }}
-          path: offline-docker-*.tar.gz
+          name: offline-docker-${{ steps.params.outputs.effective_version }}-${{ steps.params.outputs.target_arch }}
+          path: |
+            offline-docker-*.tar.gz
+            offline-docker-*.tar.gz.sha256
           retention-days: 30
 
-      - name: Publish public Release asset
-        uses: softprops/action-gh-release@v2
+  publish:
+    name: Publish public Release asset
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build outputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          tag_name: offline-${{ inputs.request_id || github.run_id }}
-          name: Docker offline package ${{ env.EFFECTIVE_DOCKER_VERSION }} / ${{ inputs.arch }}
+          name: offline-docker-${{ needs.build.outputs.effective_version }}-${{ needs.build.outputs.target_arch }}
+          path: release-assets
+
+      - name: Publish public Release assets
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: offline-${{ needs.build.outputs.request_id }}
+          name: Docker offline package ${{ needs.build.outputs.effective_version }} / ${{ needs.build.outputs.target_arch }}
           body: |
             Docker 离线安装包
 
-            - Docker version: `${{ env.EFFECTIVE_DOCKER_VERSION }}`
-            - Architecture: `${{ inputs.arch }}`
+            - Docker version: `${{ needs.build.outputs.effective_version }}`
+            - Architecture: `${{ needs.build.outputs.target_arch }}`
             - Build run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          files: offline-docker-*.tar.gz
+            - SHA256 文件随 Release 一并发布，请下载后校验。
+          files: release-assets/*
           prerelease: true

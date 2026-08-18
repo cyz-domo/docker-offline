@@ -1,6 +1,6 @@
 import { importPKCS8, SignJWT } from "jose";
 
-const VERSION_RE = /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?$/;
+const VERSION_RE = /^(?=.{1,32}$)\d+\.\d+\.\d+(?:-[a-zA-Z0-9.]+)?$/;
 const ARCHES = new Set(["x86_64", "aarch64"]);
 const MAX_BODY_BYTES = 16 * 1024;
 const JOB_TTL_MS = 15 * 24 * 60 * 60 * 1000;
@@ -58,11 +58,15 @@ export class BuildQueue {
     const state = (await this.state.storage.get("state")) || { active: null, queue: [] };
     const existing = await this.findExisting(input.version, input.arch, input.chinaMirror);
     if (existing) return { accepted: true, reused: true, job: publicJob(existing) };
+    const dailyKey = `rate:global:${Math.floor(now / 86400000)}`;
+    const dailyCount = Number(await this.state.storage.get(dailyKey) || 0);
+    if (dailyCount >= Number(this.env.MAX_REQUESTS_PER_DAY || 50)) return { accepted: false, status: 429, error: "今日构建额度已用尽，请明天再试" };
     const rateKey = `rate:v2:${input.clientIp || "unknown"}`;
     const recent = (await this.state.storage.get(rateKey) || []).filter((time) => now - time < 60 * 60 * 1000);
     if (recent.length >= Number(this.env.MAX_REQUESTS_PER_HOUR || 10)) return { accepted: false, status: 429, error: "请求过于频繁，请稍后再试" };
     recent.push(now);
     await this.state.storage.put(rateKey, recent, { expirationTtl: 60 * 60 });
+    await this.state.storage.put(dailyKey, dailyCount + 1, { expirationTtl: 2 * 24 * 60 * 60 });
     if (state.queue.length >= Number(this.env.MAX_QUEUE_SIZE || 3) && state.active) {
       return { accepted: false, status: 429, error: "当前构建队列已满，请稍后重试" };
     }
@@ -192,10 +196,11 @@ async function enqueue(request, env) {
   if (Number(request.headers.get("content-length") || 0) > MAX_BODY_BYTES) return json({ error: "请求过大" }, 413);
   const body = await request.json().catch(() => null);
   if (!body || !VERSION_RE.test(body.version || "") || !ARCHES.has(body.arch) || typeof body.chinaMirror !== "boolean") return json({ error: "参数无效" }, 400);
-  if (env.TURNSTILE_SECRET) {
-    const result = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: new URLSearchParams({ secret: env.TURNSTILE_SECRET, response: body.turnstileToken || "", remoteip: request.headers.get("CF-Connecting-IP") || "" }) });
-    if (!(await result.json()).success) return json({ error: "验证失败，请刷新页面后重试" }, 403);
-  }
+  if (!env.TURNSTILE_SECRET) return json({ error: "验证服务未配置，请联系管理员" }, 503);
+  const turnstileResponse = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: new URLSearchParams({ secret: env.TURNSTILE_SECRET, response: body.turnstileToken || "", remoteip: request.headers.get("CF-Connecting-IP") || "" }) });
+  const turnstile = await turnstileResponse.json().catch(() => ({}));
+  const allowedHostnames = String(env.TURNSTILE_HOSTNAMES || new URL(request.url).hostname).split(",").map((hostname) => hostname.trim()).filter(Boolean);
+  if (!turnstile.success || turnstile.action !== "build" || (turnstile.hostname && !allowedHostnames.includes(turnstile.hostname))) return json({ error: "验证失败，请刷新页面后重试" }, 403);
   body.clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
   return proxyQueue(new Request("https://queue/enqueue", { method: "POST", body: JSON.stringify(body) }), env, "enqueue");
 }

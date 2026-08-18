@@ -114,7 +114,7 @@ check_disk_space() {
 validate_version() {
     local ver="$1"
     # Docker 版本格式: X.Y.Z 或 X.Y.Z-suffix
-    if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+    if [ "${#ver}" -gt 32 ] || [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
         echo "[错误] 无效的版本号格式: ${ver}"
         echo "       版本号必须匹配格式: X.Y.Z 或 X.Y.Z-suffix"
         return 1
