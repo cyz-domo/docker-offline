@@ -25,10 +25,14 @@ export class BuildQueue {
     }
     if (request.method === "GET" && url.pathname === "/history") {
       const entries = await this.state.storage.list({ prefix: "job:" });
-      const jobs = [...entries.values()].filter((job) => Date.now() - job.createdAt < JOB_TTL_MS).sort((a, b) => b.createdAt - a.createdAt).slice(0, 100).map(publicJob);
+      const recentJobs = [...entries.values()].filter((job) => Date.now() - job.createdAt < JOB_TTL_MS).sort((a, b) => b.createdAt - a.createdAt).slice(0, 100);
+      const refreshedJobs = [];
+      for (const job of recentJobs) refreshedJobs.push(await this.refresh(job));
+      const jobs = refreshedJobs.map(publicJob);
+      const jobReleaseTags = new Set(recentJobs.map((job) => `offline-${job.requestId}`));
       let releases = [];
       try {
-        releases = (await githubFetch(this.env, `/repos/${this.env.GITHUB_OWNER}/${this.env.GITHUB_REPO}/releases?per_page=100`)).filter((release) => release.tag_name.startsWith("offline-")).map((release) => ({ name: release.name, createdAt: release.created_at, url: release.html_url, downloadUrl: release.assets?.[0]?.browser_download_url || null }));
+        releases = (await githubFetch(this.env, `/repos/${this.env.GITHUB_OWNER}/${this.env.GITHUB_REPO}/releases?per_page=100`)).filter((release) => release.tag_name.startsWith("offline-") && !jobReleaseTags.has(release.tag_name)).map((release) => ({ name: release.name, createdAt: release.created_at, url: release.html_url, downloadUrl: release.assets?.[0]?.browser_download_url || null }));
       } catch (_error) {}
       const jobHistory = jobs.map((job) => ({ name: `${job.version} / ${job.arch}（${job.status}）`, createdAt: new Date(job.createdAt).toISOString(), url: job.runUrl, downloadUrl: job.downloadUrl }));
       return json({ jobs, releases: [...releases, ...jobHistory] });
