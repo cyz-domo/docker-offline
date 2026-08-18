@@ -159,8 +159,9 @@ export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders() });
     const url = new URL(request.url);
-    if (url.pathname === "/") return new Response(modernIndexHtml(env), { headers: { "content-type": "text/html; charset=UTF-8" } });
-    if (url.pathname === "/history") return new Response(modernHistoryHtml(), { headers: { "content-type": "text/html; charset=UTF-8" } });
+    if (url.pathname === "/favicon.svg") return new Response(faviconSvg(), { headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" } });
+    if (url.pathname === "/") return new Response(blueTheme(modernIndexHtml(env)), { headers: { "content-type": "text/html; charset=UTF-8" } });
+    if (url.pathname === "/history") return new Response(blueTheme(modernHistoryHtml()), { headers: { "content-type": "text/html; charset=UTF-8" } });
     if (url.pathname === "/api/jobs" && request.method === "POST") return enqueue(request, env);
     if (url.pathname.startsWith("/api/jobs/") && request.method === "GET") return proxyQueue(request, env, `jobs/${url.pathname.slice(10)}`);
     if (url.pathname === "/api/history" && request.method === "GET") return proxyQueue(request, env, "history");
@@ -216,6 +217,14 @@ async function triggerWorkflow(env, job) {
 
 async function findRun(env, requestId) { const data = await githubFetch(env, `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/${env.GITHUB_WORKFLOW_FILE || "build.yml"}/runs?event=workflow_dispatch&per_page=20`); return data.workflow_runs.find((run) => run.display_title?.includes(requestId) || run.name?.includes(requestId)); }
 async function findRelease(env, requestId) { return githubFetch(env, `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/releases/tags/offline-${requestId}`); }
+
+function blueTheme(html) {
+  return html.replace("</head>", `<link rel="icon" href="/favicon.svg" type="image/svg+xml"><style>body{background:radial-gradient(circle at 12% -5%,#d9efff 0,transparent 34%),radial-gradient(circle at 95% 8%,#dff7ff 0,transparent 30%),#f7fbff}.mark{background:linear-gradient(135deg,#0b63f6,#00a8e8)!important;box-shadow:0 8px 24px #008ff044!important}.eyebrow{color:#0878f9!important}.primary{background:linear-gradient(135deg,#087cf8,#00a8e8)!important;box-shadow:0 10px 22px #008ff044!important}.primary:focus-visible,.action:focus-visible,.nav a:focus-visible{outline:3px solid #79d7ff;outline-offset:3px}.action{background:#e6f4ff!important;color:#075985!important}.action.download{background:#e4f8ee!important;color:#166534!important}.card{box-shadow:0 20px 55px #0077b814,0 2px 8px #1e293b0d!important}</style></head>`);
+}
+
+function faviconSvg() {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0b63f6"/><stop offset="1" stop-color="#00a8e8"/></linearGradient></defs><rect width="64" height="64" rx="18" fill="url(#g)"/><path d="M18 16h18c9 0 14 5 14 12 0 5-3 9-8 11l10 10H40L30 40h-3v9H18V16Zm9 8v8h8c4 0 6-1 6-4s-2-4-6-4h-8Z" fill="white"/><circle cx="50" cy="14" r="4" fill="#b8f3ff"/></svg>`;
+}
 
 function modernIndexHtml(env) {
   const turnstile = env.TURNSTILE_SITE_KEY ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>` : "";
