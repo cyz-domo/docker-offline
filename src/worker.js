@@ -27,14 +27,14 @@ export class BuildQueue {
       const entries = await this.state.storage.list({ prefix: "job:" });
       const recentJobs = [...entries.values()].filter((job) => Date.now() - job.createdAt < JOB_TTL_MS).sort((a, b) => b.createdAt - a.createdAt).slice(0, 100);
       const refreshedJobs = [];
-      for (const job of recentJobs) refreshedJobs.push(await this.refresh(job));
+      for (const job of recentJobs) refreshedJobs.push(["starting", "queued", "building"].includes(job.status) ? await this.refresh(job) : job);
       const jobs = refreshedJobs.map(publicJob);
       const jobReleaseTags = new Set(recentJobs.map((job) => `offline-${job.requestId}`));
       let releases = [];
       try {
         releases = (await githubFetch(this.env, `/repos/${this.env.GITHUB_OWNER}/${this.env.GITHUB_REPO}/releases?per_page=100`)).filter((release) => release.tag_name.startsWith("offline-") && !jobReleaseTags.has(release.tag_name)).map((release) => ({ name: release.name, createdAt: release.created_at, url: release.html_url, downloadUrl: release.assets?.[0]?.browser_download_url || null }));
       } catch (_error) {}
-      const jobHistory = jobs.map((job) => ({ name: `${job.version} / ${job.arch}（${job.status}）`, createdAt: new Date(job.createdAt).toISOString(), url: job.runUrl, downloadUrl: job.downloadUrl }));
+      const jobHistory = jobs.map((job) => ({ name: `${job.version} / ${job.arch}（${job.status}${job.progress && job.status === "building" ? ` · ${job.progress.percent}% · ${job.progress.step}` : ""}）`, createdAt: new Date(job.createdAt).toISOString(), url: job.runUrl, downloadUrl: job.downloadUrl, status: job.status, progress: job.progress || null }));
       return json({ jobs, releases: [...releases, ...jobHistory] });
     }
     if (request.method === "POST" && url.pathname === "/cleanup") {
@@ -117,7 +117,9 @@ export class BuildQueue {
       job.runUrl = run.html_url;
       if (run.status !== "completed") {
         job.status = "building";
+        job.progress = await findRunProgress(this.env, run);
       } else if (run.conclusion === "success") {
+        job.progress = { percent: 100, completedSteps: 0, totalSteps: 0, step: "正在发布构建产物" };
         const release = await findRelease(this.env, job.requestId);
         if (release) {
           job.status = "success";
@@ -126,6 +128,7 @@ export class BuildQueue {
         }
       } else {
         job.status = "failed";
+        job.progress = job.progress || { percent: 0, completedSteps: 0, totalSteps: 0, step: "构建失败" };
         job.error = `GitHub Actions 构建结果：${run.conclusion || "未知"}`;
       }
       job.updatedAt = Date.now();
@@ -192,7 +195,7 @@ async function proxyQueue(request, env, path) {
 }
 
 function publicJob(job) {
-  return { id: job.id, version: job.version, arch: job.arch, chinaMirror: job.chinaMirror, status: job.status, runUrl: job.runUrl || null, downloadUrl: job.downloadUrl || null, releaseUrl: job.releaseUrl || null, error: job.error || null, createdAt: job.createdAt, updatedAt: job.updatedAt };
+  return { id: job.id, version: job.version, arch: job.arch, chinaMirror: job.chinaMirror, status: job.status, progress: job.progress || null, runUrl: job.runUrl || null, downloadUrl: job.downloadUrl || null, releaseUrl: job.releaseUrl || null, error: job.error || null, createdAt: job.createdAt, updatedAt: job.updatedAt };
 }
 
 function json(data, status = 200) { return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders(), "content-type": "application/json; charset=UTF-8" } }); }
@@ -217,6 +220,7 @@ async function triggerWorkflow(env, job) {
 
 async function findRun(env, requestId) { const data = await githubFetch(env, `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/${env.GITHUB_WORKFLOW_FILE || "build.yml"}/runs?event=workflow_dispatch&per_page=20`); return data.workflow_runs.find((run) => run.display_title?.includes(requestId) || run.name?.includes(requestId)); }
 async function findRelease(env, requestId) { return githubFetch(env, `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/releases/tags/offline-${requestId}`); }
+async function findRunProgress(env, run) { try { const data = await githubFetch(env, `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/runs/${run.id}/jobs?per_page=100`); const active = data.jobs.find((job) => job.status === "in_progress") || data.jobs.find((job) => job.status === "queued") || data.jobs[0]; const steps = active?.steps || []; const completedSteps = steps.filter((step) => step.status === "completed").length; const current = steps.find((step) => step.status === "in_progress") || steps.find((step) => step.status === "queued"); return { percent: steps.length ? Math.min(99, Math.round((completedSteps / steps.length) * 100)) : 0, completedSteps, totalSteps: steps.length, step: current?.name || (active?.status === "queued" ? "等待 Runner" : "准备构建") }; } catch (_error) { return { percent: 0, completedSteps: 0, totalSteps: 0, step: "正在获取构建进度" }; } }
 
 function blueTheme(html) {
   const control = `<div class="mirror-control"><div><b>下载加速</b><span>选择合适的下载通道，提升国内网络下载速度</span></div><select id="downloadMirror"><option value="direct">直连 GitHub</option><option value="https://ghproxy.com">ghproxy.com</option><option value="https://gh-proxy.com">gh-proxy.com</option><option value="https://ghfast.top">ghfast.top</option><option value="https://mirror.ghproxy.com">mirror.ghproxy.com</option><option value="custom">自定义加速域名</option></select><input id="customMirror" placeholder="例如 https://your-mirror.example.com" autocomplete="url"></div>`;
@@ -224,7 +228,11 @@ function blueTheme(html) {
   const styled = html.replace("</head>", `<link rel="icon" href="/favicon.svg" type="image/svg+xml"><style>body{background:radial-gradient(circle at 12% -5%,#d9efff 0,transparent 34%),radial-gradient(circle at 95% 8%,#dff7ff 0,transparent 30%),#f7fbff}.mark{background:linear-gradient(135deg,#0b63f6,#00a8e8)!important;box-shadow:0 8px 24px #008ff044!important}.eyebrow{color:#0878f9!important}.primary{background:linear-gradient(135deg,#087cf8,#00a8e8)!important;box-shadow:0 10px 22px #008ff044!important}.primary:focus-visible,.action:focus-visible,.nav a:focus-visible{outline:3px solid #79d7ff;outline-offset:3px}.action{background:#e6f4ff!important;color:#075985!important}.action.download{background:#e4f8ee!important;color:#166534!important}.card{box-shadow:0 20px 55px #0077b814,0 2px 8px #1e293b0d!important}.mirror-control{display:grid;grid-template-columns:1fr 220px;gap:10px;align-items:center;margin:0 0 18px;padding:13px 14px;border:1px solid #d9edf9;border-radius:13px;background:#f4fbff}.mirror-control b{display:block;color:#075985;font-size:13px}.mirror-control span{display:block;color:#7891a7;font-size:12px;margin-top:2px}.mirror-control select,.mirror-control input{width:100%;height:38px;border:1px solid #cce3f1;border-radius:9px;background:#fff;padding:0 10px;color:#172033;font:13px inherit}.mirror-control input{grid-column:2}@media(max-width:640px){.mirror-control{grid-template-columns:1fr}.mirror-control input{grid-column:1}}</style></head>`);
   let withControl = styled.replace('<div id="result"></div>', `${control}<div id="result"></div>`);
   if (withControl.includes('id="list"')) withControl = withControl.replace('<div id="list"', `${control}<div id="list"`);
-  return withControl.replace("</body>", `${script}</body>`);
+  return withControl.replace("</body>", `${script}${progressEnhancement()}</body>`);
+}
+
+function progressEnhancement() {
+  return `<style>.live-progress{margin:18px 0 2px}.progress-top{display:flex;justify-content:space-between;color:#526079;font-size:12px;font-weight:650;margin-bottom:7px}.progress-top b{color:#0878f9}.progress-track{height:7px;border-radius:99px;background:#dff0fa;overflow:hidden}.progress-track i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#087cf8,#00b8e8);transition:width .4s ease}.live-progress small{display:block;color:#8290a8;font-size:11px;margin-top:7px}</style><script>(function(){const originalFetch=window.fetch.bind(window),escapeText=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));window.fetch=(...args)=>originalFetch(...args).then(response=>{const requestUrl=typeof args[0]==='string'?args[0]:args[0]?.url||'';if(requestUrl.includes('/api/jobs/')&&!requestUrl.endsWith('/api/jobs/'))response.clone().json().then(job=>{const box=document.querySelector('#result .result');if(!box||!job.progress)return;let panel=box.querySelector('.live-progress');if(!panel){panel=document.createElement('div');panel.className='live-progress';const actions=box.querySelector('.actions');box.insertBefore(panel,actions||null)}const percent=Math.max(0,Math.min(100,Number(job.progress.percent)||0));panel.innerHTML='<div class="progress-top"><span>'+escapeText(job.progress.step||'正在构建')+'</span><b>'+percent+'%</b></div><div class="progress-track"><i style="width:'+percent+'%"></i></div><small>已完成 '+(job.progress.totalSteps?escapeText(job.progress.completedSteps)+' / '+escapeText(job.progress.totalSteps)+' 个步骤':'正在同步 GitHub Actions 状态')+'</small>'}).catch(()=>{});return response})})()</script>`;
 }
 
 function faviconSvg() {
