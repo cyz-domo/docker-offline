@@ -199,8 +199,9 @@ async function enqueue(request, env) {
   if (!env.TURNSTILE_SECRET) return json({ error: "验证服务未配置，请联系管理员" }, 503);
   const turnstileResponse = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: new URLSearchParams({ secret: env.TURNSTILE_SECRET, response: body.turnstileToken || "", remoteip: request.headers.get("CF-Connecting-IP") || "" }) });
   const turnstile = await turnstileResponse.json().catch(() => ({}));
-  const allowedHostnames = String(env.TURNSTILE_HOSTNAMES || new URL(request.url).hostname).split(",").map((hostname) => hostname.trim()).filter(Boolean);
-  if (!turnstile.success || turnstile.action !== "build" || (turnstile.hostname && !allowedHostnames.includes(turnstile.hostname))) return json({ error: "验证失败，请刷新页面后重试" }, 403);
+  const allowedHostnames = String(env.TURNSTILE_HOSTNAMES || new URL(request.url).hostname).split(",").map((hostname) => hostname.trim().toLowerCase().replace(/\.$/, "")).filter(Boolean);
+  const turnstileHostname = typeof turnstile.hostname === "string" ? turnstile.hostname.trim().toLowerCase().replace(/\.$/, "") : "";
+  if (!turnstile.success || turnstile.action !== "build" || !turnstileHostname || !allowedHostnames.includes(turnstileHostname)) return json({ error: "验证失败，请刷新页面后重试" }, 403);
   body.clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
   return proxyQueue(new Request("https://queue/enqueue", { method: "POST", body: JSON.stringify(body) }), env, "enqueue");
 }
