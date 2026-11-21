@@ -1,8 +1,10 @@
 name: Cleanup Offline Package Releases
 
 on:
-  schedule:
-    - cron: '37 3 * * *'
+  # 构建完成后触发清理，避免 schedule 工作流因仓库 60 天不活跃被自动禁用
+  workflow_run:
+    workflows: ["Build Offline Docker Package"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
