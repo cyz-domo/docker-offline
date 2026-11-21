@@ -172,6 +172,11 @@ export class BuildQueue {
     const cutoff = Date.now() - JOB_TTL_MS;
     const entries = await this.state.storage.list({ prefix: "job:" });
     for (const [key, job] of entries) if (job.createdAt < cutoff) await this.state.storage.delete(key);
+    try {
+      await cleanupReleases(this.env, cutoff);
+    } catch (error) {
+      console.warn(`清理离线包失败：${error instanceof Error ? error.message : error}`);
+    }
   }
 }
 
@@ -253,6 +258,26 @@ async function githubToken(env) {
 
 function githubHeaders(token) { return { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "docker-offline-builder" }; }
 async function githubFetch(env, path, options = {}) { const token = await githubToken(env); const response = await fetch(`https://api.github.com${path}`, { ...options, headers: { ...githubHeaders(token), ...(options.headers || {}) } }); if (!response.ok) { const detail = await response.text(); let message = detail; try { message = JSON.parse(detail).message || detail; } catch (_error) {} throw new Error(`GitHub API 请求失败（${response.status}）：${message}`); } return response.status === 204 ? null : response.json(); }
+
+async function cleanupReleases(env, cutoff) {
+  const base = `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}`;
+  const stale = [];
+  for (let page = 1; ; page += 1) {
+    const releases = await githubFetch(env, `${base}/releases?per_page=100&page=${page}`);
+    for (const release of releases) {
+      if (release.tag_name.startsWith("offline-") && Date.parse(release.created_at) < cutoff) stale.push(release);
+    }
+    if (releases.length < 100) break;
+  }
+  for (const release of stale) {
+    try {
+      await githubFetch(env, `${base}/releases/${release.id}`, { method: "DELETE" });
+      await githubFetch(env, `${base}/git/refs/tags/${encodeURIComponent(release.tag_name)}`, { method: "DELETE" });
+    } catch (error) {
+      console.warn(`无法删除 ${release.tag_name}: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+}
 
 async function triggerWorkflow(env, job) {
   const path = `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/${env.GITHUB_WORKFLOW_FILE || "build.yml"}/dispatches`;
